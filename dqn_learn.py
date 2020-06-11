@@ -20,11 +20,13 @@ from utils.gym import get_wrapper_by_name
 USE_CUDA = torch.cuda.is_available()
 dtype = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
 
+
 class Variable(autograd.Variable):
     def __init__(self, data, *args, **kwargs):
         if USE_CUDA:
             data = data.cuda()
         super(Variable, self).__init__(data, *args, **kwargs)
+
 
 """
     OptimizerSpec containing following attributes
@@ -38,21 +40,21 @@ Statistic = {
     "best_mean_episode_rewards": []
 }
 
-def dqn_learing(
-    env,
-    q_func,
-    optimizer_spec,
-    exploration,
-    stopping_criterion=None,
-    replay_buffer_size=1000000,
-    batch_size=32,
-    gamma=0.99,
-    learning_starts=50000,
-    learning_freq=4,
-    frame_history_len=4,
-    target_update_freq=10000
-    ):
 
+def dqn_learing(
+        env,
+        q_func,
+        optimizer_spec,
+        exploration,
+        stopping_criterion=None,
+        replay_buffer_size=1000000,
+        batch_size=32,
+        gamma=0.99,
+        learning_starts=50000,
+        learning_freq=4,
+        frame_history_len=4,
+        target_update_freq=10000
+):
     """Run Deep Q-learning algorithm.
 
     You can specify your own convnet using q_func.
@@ -95,7 +97,7 @@ def dqn_learing(
         each update to the target Q network
     """
     assert type(env.observation_space) == gym.spaces.Box
-    assert type(env.action_space)      == gym.spaces.Discrete
+    assert type(env.action_space) == gym.spaces.Discrete
 
     ###############
     # BUILD MODEL #
@@ -124,9 +126,13 @@ def dqn_learing(
     ######
 
     # YOUR CODE HERE
+    Q = q_func(in_channels = input_arg, num_actions = num_actions)
+    target_Q = q_func(in_channels = input_arg, num_actions = num_actions)
 
+    if USE_CUDA:
+        Q.cuda()
+        target_Q.cuda()
     ######
-
 
     # Construct Q network optimizer function
     optimizer = optimizer_spec.constructor(Q.parameters(), **optimizer_spec.kwargs)
@@ -180,7 +186,24 @@ def dqn_learing(
         #####
 
         # YOUR CODE HERE
+        # Store last observation in replay buffer and encode it
+        idx = replay_buffer.store_frame(last_obs)
+        last_obs_encoded = replay_buffer.encode_recent_observation()
 
+        # Select action from epsilon-greedy policy
+        action = select_epilson_greedy_action(Q, last_obs_encoded, t)
+
+        # Step the simulator
+        obs, reward, done, info = env.step(action)
+
+        # Update the replay buffer
+        replay_buffer.store_effect(idx, action, reward, done)
+
+        # If done, reset env to get a new observation. Otherwise, set last_env to point to the new observation
+        if done:
+            last_obs = env.reset()
+        else:
+            last_obs = obs
         #####
 
         # at this point, the environment should have been advanced one step (and
@@ -191,9 +214,7 @@ def dqn_learing(
         # Note that this is only done if the replay buffer contains enough samples
         # for us to learn something useful -- until then, the model will not be
         # initialized and random actions should be taken
-        if (t > learning_starts and
-                t % learning_freq == 0 and
-                replay_buffer.can_sample(batch_size)):
+        if (t > learning_starts and t % learning_freq == 0 and replay_buffer.can_sample(batch_size)):
             # Here, you should perform training. Training consists of four steps:
             # 3.a: use the replay buffer to sample a batch of transitions (see the
             # replay buffer code for function definition, each batch that you sample
@@ -218,8 +239,33 @@ def dqn_learing(
             #####
 
             # YOUR CODE HERE
+            # 3.a
+            obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = replay_buffer.sample(batch_size)
 
-            #####
+            obs_batch = Variable(torch.from_numpy(obs_batch).type(dtype)) / 255.0
+            act_batch = Variable(torch.from_numpy(act_batch).type(dtype).long())
+            rew_batch = Variable(torch.from_numpy(rew_batch).type(dtype))
+            next_obs_batch = Variable(torch.from_numpy(next_obs_batch).type(dtype)) / 255.0
+            done_mask = Variable(torch.from_numpy(done_mask).type(dtype))
+
+            # 3.b
+            curr_Q_vals = Q(obs_batch).gather(1, act_batch.view(-1, 1)).squeeze()
+            next_Q_vals = target_Q(next_obs_batch).max(1)[0] * (1 - done_mask)
+            bellman_error = rew_batch + gamma * next_Q_vals - curr_Q_vals
+            bellman_error = -bellman_error.clamp(-1, 1)
+
+            # 3.c
+            optimizer.zero_grad()
+            curr_Q_vals.backward(bellman_error.data)
+            optimizer.step()
+
+            # 3.d
+            if t % target_update_freq == 0:
+                state_dict = Q.state_dict()
+                target_Q.load_state_dict(state_dict)
+                num_param_updates += 1
+
+        #####
 
         ### 4. Log progress and keep track of statistics
         episode_rewards = get_wrapper_by_name(env, "Monitor").get_episode_rewards()
